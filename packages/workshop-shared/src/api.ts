@@ -539,6 +539,18 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   listModels(kind?: ModelKind): Promise<AiChatAuthorInfo[]>;
 
+  /** Whether this local runtime supports ChatGPT and this Workshop user has connected it. */
+  getChatGptStatus(): Promise<{ available: boolean; connected: boolean; email?: string; sharingEnabled?: boolean; error?: string }>;
+
+  /** Start a local, user-bound OAuth attempt. Credentials never enter the browser or Worker. */
+  startChatGptLogin(): Promise<{ url: string }>;
+
+  /** List the connected ChatGPT account's currently offered models, preserving server order. */
+  listChatGptModels(): Promise<{ slug: string; displayName: string }[]>;
+
+  /** Forget this user's local ChatGPT credentials and cancel pending local authorization. */
+  disconnectChatGpt(): Promise<{ revoked: boolean }>;
+
   /**
    * Adds a new model to the user's configured set. The ID must not name a model the user already
    * added; use `updateModel()` to replace one.
@@ -1929,6 +1941,12 @@ export type AiModelConfig = {
   /** Which AI provider hosts the model? */
   provider: AiModelProvider;
 
+  /** Explicit local ChatGPT subscription routing; absent preserves existing API-key routing. */
+  authentication?: "chatgpt";
+
+  /** Server-owned Workshop identity for local broker routing. Never accepted from a client. */
+  chatgptOwner?: string;
+
   /** Name of the specific model, as specified to the provider's API. */
   model: string;
 
@@ -2007,7 +2025,7 @@ export type AiModelConfig = {
  */
 export type RedactedAiModelConfig = Omit<AiModelConfig,
     "apiToken" | "extraHeaders" | "reasoning" | "compactionInputBudget" | "behavesLike" |
-    "capabilities"> & {
+    "capabilities" | "chatgptOwner"> & {
   /** `AiModelConfig.apiToken`, or null if withheld. */
   apiToken: string | null;
 

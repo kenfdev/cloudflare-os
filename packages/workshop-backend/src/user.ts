@@ -1,3 +1,4 @@
+import { chatGptBroker, localChatGptAvailable } from "./chatgpt-local.js";
 import { RpcStub } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelKind, modelKind, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, NotificationMute, UserNotification, type DeviceSessionHandoffStart } from '@gadgets/workshop-shared/api';
 import { ActionDescription, Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, GatekeeperUserSelection, GatekeeperUserSelectionExchange, RedeemedGatekeeperUserSelection } from "@gadgets/workshop-shared/gatekeeper";
@@ -81,7 +82,7 @@ const withholdSecret = (secret: string) => secret === "" ? "" : null;
 
 /** Withholds the non-empty secrets of `config`, for returning it to a client. */
 function redactModelConfig(config: AiModelConfig): RedactedAiModelConfig {
-  let {apiToken, extraHeaders, ...rest} = config;
+  let {apiToken, extraHeaders, chatgptOwner, ...rest} = config;
   return {
     ...rest,
     apiToken: withholdSecret(apiToken),
@@ -639,6 +640,39 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.profile.put(profile);
   }
 
+  async getChatGptStatus(): Promise<{ available: boolean; connected: boolean; email?: string; sharingEnabled?: boolean; error?: string }> {
+    if (!localChatGptAvailable(this.env)) return { available: false, connected: false };
+    let response = await chatGptBroker(this.env, this.ctx.id.toString(), "/status");
+    let status = await response.json<{
+      connected: boolean; sharing: boolean; identity?: { email?: string }; error?: { code: string };
+    }>();
+    return { available: true, connected: status.connected === true,
+      sharingEnabled: status.sharing === true, email: status.identity?.email,
+      error: status.error ? "ChatGPT connection needs attention. Please reconnect." : undefined };
+  }
+
+  async startChatGptLogin(): Promise<{ url: string }> {
+    let response = await chatGptBroker(this.env, this.ctx.id.toString(), "/start", { method: "POST" });
+    let result = await response.json<{ authorizationUrl: string }>();
+    let url = new URL(result.authorizationUrl);
+    if (url.origin !== "https://auth.openai.com" || url.pathname !== "/api/accounts/authorize") {
+      throw new Error("The local ChatGPT broker returned an invalid authorization URL.");
+    }
+    return { url: url.toString() };
+  }
+
+  async listChatGptModels(): Promise<{ slug: string; displayName: string }[]> {
+    let response = await chatGptBroker(this.env, this.ctx.id.toString(), "/models");
+    let result = await response.json<{ models: { slug: string; displayName: string }[] }>();
+    return result.models;
+  }
+
+  async disconnectChatGpt(): Promise<{ revoked: boolean }> {
+    let response = await chatGptBroker(this.env, this.ctx.id.toString(), "/logout", { method: "POST" });
+    let result = await response.json<{ revoked: boolean }>();
+    return { revoked: result.revoked === true };
+  }
+
   async listModels(kind: ModelKind = "language"): Promise<AiChatAuthorInfo[]> {
     return this.#listModels(await getGatewayModels(this.env), kind);
   }
@@ -653,9 +687,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     // Also include user-configured models, where users may add their own, skipping any that a
     // gateway model shadows, whatever its mode (see #resolveModel()).
-    if (models && !models.userModels) return result;
     for (let model of this.storage.aiModels.list()) {
-      if (!models?.get(model.profile.id) &&
+      if ((!models || models.userModels || model.config.authentication === "chatgpt") &&
+          !models?.get(model.profile.id) &&
           modelKind(model.config.provider, model.config.model) === kind) {
         result.push(model.profile);
       }
@@ -666,7 +700,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async addModel(profile: AiChatAuthorInfo, config: RedactedAiModelConfig,
                  copySecretsFrom?: string): Promise<void> {
     let models = await getGatewayModels(this.env);
-    models?.refuseUserModel();
+    if (config.authentication !== "chatgpt") models?.refuseUserModel();
     let source: AiModelConfig | undefined;
     if (copySecretsFrom !== undefined) {
       source = this.#getHandAddedModel(copySecretsFrom, models).config;
@@ -685,9 +719,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async updateModel(profile: AiChatAuthorInfo, config: RedactedAiModelConfig): Promise<void> {
     let models = await getGatewayModels(this.env);
-    models?.refuseUserModel();
+    if (config.authentication !== "chatgpt") models?.refuseUserModel();
     let stored = this.#getHandAddedModel(profile.id, models).config;
-    if (config.provider !== stored.provider || config.model !== stored.model) {
+    if (config.authentication !== stored.authentication ||
+        config.provider !== stored.provider || config.model !== stored.model) {
       throw new Error("A model's provider and model ID can't be changed.");
     }
     this.#putModel(profile, resolveWithheldSecrets(config, stored), models);
@@ -704,7 +739,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   #putModel(profile: AiChatAuthorInfo, config: AiModelConfig, models: GatewayModels | null) {
-    if (models && !models.providers.has(config.provider)) {
+    if (config.authentication !== "chatgpt" && models && !models.providers.has(config.provider)) {
       throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
     }
     for (let limit of [config.contextWindow, config.outputLimit]) {
@@ -715,10 +750,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     // capnweb-validate lets through properties that RedactedAiModelConfig omits, and these are a
     // deployment's to set on its own models.
-    let {reasoning, compactionInputBudget, behavesLike, capabilities, ...own} = config;
+    let {reasoning, compactionInputBudget, behavesLike, capabilities, chatgptOwner, ...own} = config;
+    if (own.authentication === "chatgpt") {
+      if (!localChatGptAvailable(this.env)) throw new Error("ChatGPT requires pnpm run-local --chatgpt.");
+      if (own.provider !== "openai" || own.apiToken || own.apiUrl || own.extraHeaders) {
+        throw new Error("ChatGPT models cannot supply provider credentials, headers, or an endpoint.");
+      }
+      // Identity comes from the authenticated user's DO, never the profile or browser config.
+      config = { ...own, chatgptOwner: this.ctx.id.toString() };
+    } else {
+      config = own;
+    }
 
     profile.type = "agent";
-    this.storage.aiModels.put({profile, config: own});
+    this.storage.aiModels.put({profile, config});
   }
 
   async deleteModel(id: string): Promise<void> {
@@ -870,8 +915,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     // Resolve the quick model (used for lightweight tasks like title generation).
-    if (models) {
-      // In AI Gateway mode, always use the hardcoded quick model.
+    let quickId = this.storage.quickModel.get();
+    let quick = quickId ? this.storage.aiModels.get(quickId)?.config : undefined;
+    if (result.aiModel?.config.authentication === "chatgpt") {
+      // A subscription chat must never silently charge a gateway for titles or compaction.
+      result.quickModel = result.aiModel.config;
+    } else if (quick?.authentication === "chatgpt") {
+      result.quickModel = quick;
+    } else if (models) {
+      // In AI Gateway mode, use its quick model unless ChatGPT was explicitly selected.
       result.quickModel = models.gateway.getQuickModelConfig();
     } else {
       let quickModelId = this.storage.quickModel.get();
@@ -907,7 +959,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    */
   #resolveModel(id: string, models: GatewayModels | null): UserAiModelRecord | undefined {
     if (models?.get(id)) return models.resolve(id);
-    return models && !models.userModels ? undefined : this.storage.aiModels.get(id);
+    let stored = this.storage.aiModels.get(id);
+    return models && !models.userModels && stored?.config.authentication !== "chatgpt"
+        ? undefined : stored;
   }
 
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
