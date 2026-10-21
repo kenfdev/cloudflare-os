@@ -4,6 +4,7 @@ import { AiChatAuthorInfo, AiModelProvider, AiGatewayInfo, RedactedAiModelConfig
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { ExtraHeadersEditor } from './features/ai-models/ExtraHeadersEditor'
+import { ChatGptConnectionPanel } from './features/ai-models/ChatGptConnectionPanel'
 import { StoredSecretInput } from './features/ai-models/StoredSecretInput'
 import {
   headerRowsFromRecord, headerRowsToRecord, validateHeaderRows, type HeaderRow,
@@ -115,6 +116,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   // the modal (with a `key`) to switch source.
   const source = mode.type === 'add' ? null : mode.source
   const editing = mode.type === 'edit'
+  const chatGptSource = source?.config.authentication === 'chatgpt'
 
   const [loading, setLoading] = useState(false)
   const [selection, setSelection] = useState<SelectionType | null>(
@@ -208,7 +210,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
     const isOllama = selection?.provider === 'ollama'
     const isCloudflare = selection?.provider === 'cloudflare'
-    const showCredentials = !gatewayMode
+    const showCredentials = !gatewayMode && !chatGptSource
 
     if (showCredentials && selection && isTokenRequired(selection.provider, headerRows) && effectiveApiToken?.trim() === '') {
       newErrors.apiToken = apiToken === null
@@ -261,19 +263,20 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       const profile: AiChatAuthorInfo = {
         type: 'agent',
         // A model's ID is its identity to chats and settings, so editing never changes it.
-        id: editing ? source!.profile.id : finalModelId,
+        id: editing ? source!.profile.id : chatGptSource ? `chatgpt:${finalModelId}` : finalModelId,
         name: finalDisplayName,
       }
 
-      const extraHeaders = gatewayMode ? undefined : headerRowsToRecord(headerRows)
+      const extraHeaders = gatewayMode || chatGptSource ? undefined : headerRowsToRecord(headerRows)
       const contextWindowTokens = parseTokenLimit(contextWindow)
       const outputLimitTokens = parseTokenLimit(outputLimit)
       const config: RedactedAiModelConfig = {
         provider: selection!.provider,
         model: finalModelId,
-        apiToken: gatewayMode ? '' : effectiveApiToken?.trim() ?? null,
-        ...(!gatewayMode && accountId.trim() && { accountId: accountId.trim() }),
-        ...(!gatewayMode && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
+        apiToken: gatewayMode || chatGptSource ? '' : effectiveApiToken?.trim() ?? null,
+        ...(chatGptSource && { authentication: 'chatgpt' as const }),
+        ...(!gatewayMode && !chatGptSource && accountId.trim() && { accountId: accountId.trim() }),
+        ...(!gatewayMode && !chatGptSource && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
         ...(extraHeaders && { extraHeaders }),
         ...(contextWindowTokens && { contextWindow: contextWindowTokens }),
         ...(outputLimitTokens && { outputLimit: outputLimitTokens }),
@@ -303,7 +306,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const example = selection ? exampleModel(selection.provider) : null
   const isOllama = selection?.provider === 'ollama'
   const isCloudflare = selection?.provider === 'cloudflare'
-  const showCredentials = !gatewayMode
+  const showCredentials = !gatewayMode && !chatGptSource
   const tokenRequired = selection !== null && isTokenRequired(selection.provider, headerRows)
   const title = { add: 'Add AI Model', edit: 'Edit AI Model', clone: 'Clone AI Model' }[mode.type]
 
@@ -326,6 +329,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
         </Dialog.Title>
 
         <div className="space-y-4">
+          {visible && !source && !gatewayMode && <ChatGptConnectionPanel authenticatedApi={authenticatedApi} onModelAdded={onSuccess} />}
+          {chatGptSource && <p className="text-sm text-kumo-subtle">Uses your local ChatGPT connection. Manage sign-in on the AI providers page.</p>}
           {/* Model / Provider selection */}
           {source ? (
             <Input

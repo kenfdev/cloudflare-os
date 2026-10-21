@@ -25,6 +25,10 @@ To quickly run Cloudflare OS locally, [install pnpm](https://pnpm.io/), then do:
 
 Then visit: http://localhost:8787
 
+To use your ChatGPT subscription instead of an API key, run `pnpm run-local --chatgpt`
+and follow the [local ChatGPT setup guide](docs/local-chatgpt.md). This is local-only
+and requires an available OS credential store.
+
 This runs the whole stack locally on wrangler and workerd. This is not meant for production use, but is a quick way to see what the product does.
 
 Alternatively, you can [deploy to your Cloudflare account](https://os.cloudflare.app/deploy).

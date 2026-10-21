@@ -84,7 +84,7 @@ describe('AddModelModal', () => {
   const render = async (mode: ModelModalMode, chatModelsOnly = false) => {
     const updateModel = vi.fn<AuthenticatedApi['updateModel']>(async () => {})
     const addModel = vi.fn<AuthenticatedApi['addModel']>(async () => {})
-    const api = { updateModel, addModel } as unknown as RpcStub<AuthenticatedApi>
+    const api = { updateModel, addModel, getChatGptStatus: async () => ({ available: false, connected: false }) } as unknown as RpcStub<AuthenticatedApi>
     const container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -99,6 +99,22 @@ describe('AddModelModal', () => {
     />))
     return { updateModel, addModel }
   }
+
+  it('keeps ChatGPT credentials out of the edit form and preserves its authentication mode', async () => {
+    const { updateModel } = await render({ type: 'edit', source: {
+      profile: { type: 'agent', id: 'chatgpt:gpt-test', name: 'GPT Test (ChatGPT)' },
+      config: { provider: 'openai', model: 'gpt-test', apiToken: '', authentication: 'chatgpt' },
+    } })
+    expect(document.body.textContent).not.toContain('API Token')
+    await click(button('Advanced Settings'))
+    expect(document.body.textContent).not.toContain('API URL')
+    expect(document.body.textContent).not.toContain('Extra Headers')
+    await click(button('Save Changes'))
+    expect(updateModel).toHaveBeenCalledWith(
+      { type: 'agent', id: 'chatgpt:gpt-test', name: 'GPT Test (ChatGPT)' },
+      { provider: 'openai', model: 'gpt-test', apiToken: '', authentication: 'chatgpt' },
+    )
+  })
 
   // Onboarding picks the user's chat model, which a decision model can't be; the Providers page adds both.
   it.each([false, true])('offers decision models only without chatModelsOnly (chatModelsOnly: %s)', async (chatModelsOnly) => {

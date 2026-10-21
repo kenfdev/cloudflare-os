@@ -12,6 +12,9 @@ const api = vi.hoisted(() => ({
     ? [{ type: 'agent', id: 'decision-model', name: 'Decision model' }]
     : [{ type: 'agent', id: 'chat-model', name: 'Chat model' }]),
   getQuickModel: async () => null,
+  getPreferredModel: async () => null,
+  getChatGptStatus: async () => ({ available: false, connected: false }),
+  setPreferredModel: vi.fn<(modelId: string | null) => Promise<void>>(async () => {}),
   getAiConfig: async () => ({ enabled: false }),
   setQuickModel: vi.fn<(modelId: string | null) => Promise<void>>(async () => {}),
 }))
@@ -76,6 +79,8 @@ describe('ProvidersPage quick model', () => {
 
     const [chatMenu, decisionMenu] = document.body.querySelectorAll<HTMLElement>('[aria-label="Provider actions"]')
     expect(await menuItems(chatMenu)).toContain('Clear quick model')
+    expect(await menuItems(chatMenu)).toContain('Set as preferred model')
+    expect(await menuItems(decisionMenu)).not.toContainEqual(expect.stringContaining('preferred model'))
     expect(await menuItems(decisionMenu)).not.toContainEqual(expect.stringContaining('quick model'))
   })
 
