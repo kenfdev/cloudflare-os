@@ -84,6 +84,7 @@ try {
 // Explicit opt-in: OAuth lives in a local OS-keychain broker, never in workerd storage.
 const useChatGpt = process.argv.includes("--chatgpt");
 let chatGptBroker: { url: string; close(): Promise<void> } | undefined;
+let chatGptBrokerClosing: Promise<void> | undefined;
 let chatGptSecret: string | undefined;
 const chatGptConfigPath = join(WORKSHOP_BACKEND_DIR, "wrangler.dev.jsonc");
 if (useChatGpt) {
@@ -244,6 +245,7 @@ let shutdownExitCode: number | null = null;
 async function forceKillWrangler(exitCode: number): Promise<void> {
   if (forcingShutdown) return;
   forcingShutdown = true;
+  if (chatGptBroker) await (chatGptBrokerClosing ??= chatGptBroker.close());
   // Both walks are joined, not skipped, and before the exit below. This is the force-kill path, so
   // the temptation is to exit the moment Wrangler is dead -- but `process.exit()` here abandons
   // whatever they still had to do, and all that runs afterwards is the `exit` handler's *shallow*
@@ -271,6 +273,9 @@ async function onShutdownSignal(signal: NodeJS.Signals, exitCode: number): Promi
   receivedShutdownSignals++;
   shutdownExitCode ??= exitCode;
   if (receivedShutdownSignals > 1) return forceKillWrangler(exitCode);
+  // Group signals and the termination relay can race Wrangler's exit. Join broker cleanup
+  // on every exit path so a normal stop cannot leave its exclusive credential-store lock.
+  if (chatGptBroker) await (chatGptBrokerClosing ??= chatGptBroker.close());
   // Awaited before Wrangler is signalled: this process stays alive waiting for Wrangler's exit, so
   // there is time for the process tree walks. Ctrl-C is group-delivered, but a targeted signal
   // (kill <pid>, IDE stop buttons) reaches only this process, so the pre-flight builds have to be
@@ -713,7 +718,7 @@ wranglerChild.on("exit", async (code, signal) => {
   // `process.exit` below safe, since it can no longer fire while `forceKillWrangler` is still
   // awaiting the same walk.
   await stopDevWatchersDeepOnce();
-  await chatGptBroker?.close();
+  if (chatGptBroker) await (chatGptBrokerClosing ??= chatGptBroker.close());
   // The output was already shown via stdio: "inherit". A signal-initiated shutdown reports the
   // initiating signal's status; only when Wrangler died on its own is its status propagated.
   process.exit(shutdownExitCode ?? (signal ? 128 + (constants.signals[signal] ?? 0) : code ?? 1));
