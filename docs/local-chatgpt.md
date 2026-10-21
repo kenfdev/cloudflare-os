@@ -15,8 +15,10 @@ without Secret Service is not supported; there is deliberately no plaintext fall
 pnpm run-local --chatgpt
 ```
 
-Open http://localhost:8787, create/sign in to your **Workshop** account, and open
-**Providers**. In the local ChatGPT section:
+Open http://localhost:8787 and create or sign in to your **Workshop** account.
+For a new account, finish the setup screens. You can choose **Next** without adding
+a model or connecting services, then choose **Let's build**. Open the profile menu
+at the bottom of the sidebar and choose **Providers**. In the local ChatGPT section:
 
 1. Choose **Continue with ChatGPT** and authorize in the OpenAI browser window.
 2. Allow ChatGPT plan usage when prompted. Signing in without that permission is
@@ -78,6 +80,23 @@ Disconnect attempts to revoke the renewable session and clears local tokens. If
 remote revocation cannot be confirmed, the UI warns you to disconnect the app in
 ChatGPT Settings. A process crash can leave a fail-closed lock; see the
 [broker maintenance notes](../scripts/chatgpt/README.md) before removing it.
+
+## Local verification and troubleshooting
+
+Use the project skill at `.agents/skills/verify-local-workshop/SKILL.md` to check
+both launch modes, browser pages, built JavaScript chunks, broker security, and
+shutdown. Its agent-only checks do not sign in to OpenAI or run paid inference.
+
+Keep the server running while creating an account. Signup loads the `hash-wasm`
+password-hashing module on demand. If the browser reports a failed dynamic import,
+check that http://localhost:8787 is still available, then hard-refresh after a
+restart or rebuild. A rebuild replaces the frontend assets, so avoid rebuilding
+while another person is using the local instance.
+
+For detached Linux runs, stop the process group created by `setsid`, not only
+pnpm's outer wrapper PID. The verification skill records that group and gives the
+stop command. A normal stop must remove both the broker lock and the generated
+backend capability config before another ChatGPT launch.
 
 ## Validation and remaining manual check
 
