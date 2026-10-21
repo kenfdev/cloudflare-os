@@ -45,7 +45,9 @@
   },
   "dependencies": {
     "@cloudflare/config": "0.20.0",
+    "@napi-rs/keyring": "^2.1.2",
     "aws4fetch": "^1.0.20",
+    "jose": "^6.2.12",
     "jsonc-parser": "^3.3.1",
     "typescript6": "catalog:",
     "vite": "catalog:",
