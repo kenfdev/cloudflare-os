@@ -10,6 +10,9 @@ declare global {
       // (which is what a secret binding, can carry).
       ADMINS?: string[] | string;
 
+      // Injected only by --chatgpt local startup; never part of deployment configuration.
+      LOCAL_CHATGPT_BROKER?: { url: string; secret: string };
+
       // Workers AI binding (injected by generate-wrangler-prod / run-dev-server; not in base wrangler.jsonc).
       WORKERS_AI: Ai;
 

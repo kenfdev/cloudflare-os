@@ -13,6 +13,7 @@ import {
   Copy,
 } from '@phosphor-icons/react'
 import AddModelModal, { type ModelModalMode } from '../AddModelModal'
+import { ChatGptConnectionPanel } from '../features/ai-models/ChatGptConnectionPanel'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from '../components/menuStyles'
 
@@ -31,15 +32,18 @@ const PRIMARY_BTN =
 function ModelRow({
   model,
   isQuick,
+  isPreferred,
   isBuiltIn,
   canEdit,
   onEdit,
   onClone,
   onDelete,
   onSetQuick,
+  onSetPreferred,
 }: {
   model: AiChatAuthorInfo
   isQuick: boolean
+  isPreferred: boolean
   isBuiltIn: boolean
   /** Whether Edit and Clone are offered. Both save a model of the user's own. */
   canEdit: boolean
@@ -47,6 +51,7 @@ function ModelRow({
   onClone: () => void
   onDelete: () => void
   onSetQuick?: () => void
+  onSetPreferred?: () => void
 }) {
   return (
     <div
@@ -78,6 +83,7 @@ function ModelRow({
               built-in
             </span>
           )}
+          {isPreferred && <span className="text-xs text-kumo-subtle">preferred</span>}
           {isQuick && (
             <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[rgba(255,72,1,0.10)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.4px] text-kumo-brand">
               <Lightning size={9} weight="fill" />
@@ -104,6 +110,9 @@ function ModelRow({
             }
           />
           <DropdownMenu.Content className={MENU_CONTENT}>
+            {onSetPreferred && <DropdownMenu.Item onClick={onSetPreferred} className={MENU_ITEM}>
+              {isPreferred ? 'Clear preferred model' : 'Set as preferred model'}
+            </DropdownMenu.Item>}
             {onSetQuick && (
               <DropdownMenu.Item onClick={onSetQuick} className={MENU_ITEM}>
                 <Lightning size={13} className="mr-2" weight={isQuick ? 'fill' : 'regular'} />
@@ -154,6 +163,7 @@ function ProvidersPage() {
   const toasts = useKumoToastManager()
   const [chatModels, setChatModels] = useState<AiChatAuthorInfo[]>([])
   const [decisionModels, setDecisionModels] = useState<AiChatAuthorInfo[]>([])
+  const [preferredModel, setPreferredModel] = useState<string | null>(null)
   const [quickModel, setQuickModel] = useState<string | null>(null)
   const [aiConfig, setAiConfig] = useState<AiGatewayInfo | null>(null)
   const [search, setSearch] = useState('')
@@ -167,15 +177,17 @@ function ProvidersPage() {
   const fetchAll = async () => {
     setLoadError(false)
     try {
-      const [chatList, decisionList, qm, cfg] = await Promise.all([
+      const [chatList, decisionList, qm, cfg, pm] = await Promise.all([
         authenticatedApi.listModels(),
         authenticatedApi.listModels('decision'),
         authenticatedApi.getQuickModel(),
         authenticatedApi.getAiConfig(),
+        authenticatedApi.getPreferredModel(),
       ])
       setChatModels(chatList)
       setDecisionModels(decisionList)
       setQuickModel(qm)
+      setPreferredModel(pm)
       setAiConfig(cfg)
       // Each dialog saves a model of the user's own, so none stays open, or opens late, once the
       // deployment says users may not add theirs.
@@ -256,6 +268,21 @@ function ProvidersPage() {
     }
   }
 
+  const preferredInFlight = useRef(false)
+  const handleSetPreferred = async (modelId: string) => {
+    if (preferredInFlight.current) return
+    preferredInFlight.current = true
+    const next = preferredModel === modelId ? null : modelId
+    try {
+      await authenticatedApi.setPreferredModel(next)
+      setPreferredModel(next)
+    } catch {
+      toasts.add({ title: 'Failed to update preferred model', variant: 'error' })
+    } finally {
+      preferredInFlight.current = false
+    }
+  }
+
   const filtered = models.filter((m) => {
     if (!search) return true
     const q = search.toLowerCase()
@@ -302,6 +329,9 @@ function ProvidersPage() {
       )}
 
       <div className="chat-panel flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pt-1 pb-16">
+        {!loading && !loadError && canAddModels && !gatewayMode && !sheetOpen && (
+          <div className="px-3 pb-3"><ChatGptConnectionPanel authenticatedApi={authenticatedApi} onModelAdded={fetchAll} /></div>
+        )}
         {/* Notices */}
         {(gatewayMode || (!gatewayMode && hasChatModel)) && !loading && !loadError && (
           <div className="flex flex-col gap-2.5 px-3 pb-2">
@@ -381,11 +411,13 @@ function ProvidersPage() {
               <ModelRow
                 model={model}
                 isQuick={quickModel === model.id}
+                isPreferred={preferredModel === model.id}
                 isBuiltIn={isBuiltIn(model.id)}
                 canEdit={canAddModels}
                 onEdit={() => openWithSource('edit', model)}
                 onClone={() => openWithSource('clone', model)}
                 onDelete={() => handleDelete(model)}
+                onSetPreferred={decisionModels.includes(model) ? undefined : () => handleSetPreferred(model.id)}
                 onSetQuick={decisionModels.includes(model) ? undefined : () => handleSetQuick(model.id)}
               />
             </div>

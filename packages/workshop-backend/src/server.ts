@@ -182,6 +182,18 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   listModels(kind?: ModelKind): Promise<AiChatAuthorInfo[]> {
     return retryOnDoReset(() => this.#user.listModels(kind));
   }
+  getChatGptStatus(): Promise<{ available: boolean; connected: boolean; email?: string; sharingEnabled?: boolean; error?: string }> {
+    return this.#user.getChatGptStatus();
+  }
+  startChatGptLogin(): Promise<{ url: string }> {
+    return this.#user.startChatGptLogin();
+  }
+  listChatGptModels(): Promise<{ slug: string; displayName: string }[]> {
+    return this.#user.listChatGptModels();
+  }
+  disconnectChatGpt(): Promise<{ revoked: boolean }> {
+    return this.#user.disconnectChatGpt();
+  }
   addModel(profile: AiChatAuthorInfo, config: RedactedAiModelConfig,
            copySecretsFrom?: string): Promise<void> {
     return this.#user.addModel(profile, config, copySecretsFrom);

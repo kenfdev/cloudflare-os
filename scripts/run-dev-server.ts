@@ -12,8 +12,9 @@
 //   VITE_BACKEND_HOST=localhost:9000  Also pass --port 9000 to wrangler dev.
 
 import {
-  existsSync, readFileSync, writeFileSync, readdirSync, statSync,
+  existsSync, readFileSync, writeFileSync, readdirSync, statSync, chmodSync, unlinkSync,
 } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { connect } from "node:net";
 import { constants } from "node:os";
@@ -78,6 +79,19 @@ try {
 } catch (err) {
   console.error((err as Error).message);
   process.exit(1);
+}
+
+// Explicit opt-in: OAuth lives in a local OS-keychain broker, never in workerd storage.
+const useChatGpt = process.argv.includes("--chatgpt");
+let chatGptBroker: { url: string; close(): Promise<void> } | undefined;
+let chatGptBrokerClosing: Promise<void> | undefined;
+let chatGptSecret: string | undefined;
+const chatGptConfigPath = join(WORKSHOP_BACKEND_DIR, "wrangler.dev.jsonc");
+if (useChatGpt) {
+  const host = new URL(`http://${backendHost}`);
+  if (host.hostname !== "localhost" && host.hostname !== "127.0.0.1") {
+    throw new Error("--chatgpt requires a loopback backend host; remote serving is unsupported.");
+  }
 }
 
 // The deploy service binds CLOUDFLARE_OS_DEPLOYMENT as JSON, and the backend treats the string form
@@ -231,6 +245,7 @@ let shutdownExitCode: number | null = null;
 async function forceKillWrangler(exitCode: number): Promise<void> {
   if (forcingShutdown) return;
   forcingShutdown = true;
+  if (chatGptBroker) await (chatGptBrokerClosing ??= chatGptBroker.close());
   // Both walks are joined, not skipped, and before the exit below. This is the force-kill path, so
   // the temptation is to exit the moment Wrangler is dead -- but `process.exit()` here abandons
   // whatever they still had to do, and all that runs afterwards is the `exit` handler's *shallow*
@@ -258,6 +273,9 @@ async function onShutdownSignal(signal: NodeJS.Signals, exitCode: number): Promi
   receivedShutdownSignals++;
   shutdownExitCode ??= exitCode;
   if (receivedShutdownSignals > 1) return forceKillWrangler(exitCode);
+  // Group signals and the termination relay can race Wrangler's exit. Join broker cleanup
+  // on every exit path so a normal stop cannot leave its exclusive credential-store lock.
+  if (chatGptBroker) await (chatGptBrokerClosing ??= chatGptBroker.close());
   // Awaited before Wrangler is signalled: this process stays alive waiting for Wrangler's exit, so
   // there is time for the process tree walks. Ctrl-C is group-delivered, but a targeted signal
   // (kill <pid>, IDE stop buttons) reaches only this process, so the pre-flight builds have to be
@@ -557,6 +575,15 @@ for (const gk of gatekeepers) {
 // service bindings using the GatekeeperVendor entrypoint).
 // ---------------------------------------------------------------------------
 {
+  if (useChatGpt) {
+    const { startBroker } = await import("./chatgpt/broker.mjs");
+    chatGptSecret = randomBytes(32).toString("base64url");
+    chatGptBroker = await startBroker({ secret: chatGptSecret });
+    process.on("exit", () => {
+      // A capability for this run must not remain in a generated config after ordinary shutdown.
+      try { unlinkSync(chatGptConfigPath); } catch { /* Already removed. */ }
+    });
+  }
   const srcPath = join(ROOT, "packages", "workshop-backend", "wrangler.jsonc");
   const config = parse(readFileSync(srcPath, "utf8"));
 
@@ -565,6 +592,9 @@ for (const gk of gatekeepers) {
   // For local testing, create an account named "admin" to test admin features.
   config.vars = config.vars || {};
   config.vars.ADMINS = ["admin"];
+  if (chatGptBroker) {
+    config.vars.LOCAL_CHATGPT_BROKER = { url: chatGptBroker.url, secret: chatGptSecret };
+  }
 
   if (cloudflareOsDeployment !== undefined) {
     config.vars.CLOUDFLARE_OS_DEPLOYMENT = cloudflareOsDeployment;
@@ -634,7 +664,8 @@ for (const gk of gatekeepers) {
   config.build = devBuildConfig(config.build, WORKSHOP_BACKEND_DIR);
 
   const outPath = join(ROOT, "packages", "workshop-backend", "wrangler.dev.jsonc");
-  writeFileSync(outPath, JSON.stringify(config, null, 2) + "\n");
+  if (chatGptBroker && existsSync(outPath)) chmodSync(outPath, 0o600);
+  writeFileSync(outPath, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
   console.log(`generated: ${outPath}`);
 }
 
@@ -649,6 +680,8 @@ const configs = [
 ];
 
 const args = configs.flatMap(c => ["-c", c]);
+// Wrangler's normal binding listing would serialize the broker capability. Keep it out of logs.
+if (useChatGpt) args.push("--ip", "127.0.0.1", "--log-level", "error");
 if (wranglerPort) {
   args.push("--port", wranglerPort);
 } else {
@@ -685,6 +718,7 @@ wranglerChild.on("exit", async (code, signal) => {
   // `process.exit` below safe, since it can no longer fire while `forceKillWrangler` is still
   // awaiting the same walk.
   await stopDevWatchersDeepOnce();
+  if (chatGptBroker) await (chatGptBrokerClosing ??= chatGptBroker.close());
   // The output was already shown via stdio: "inherit". A signal-initiated shutdown reports the
   // initiating signal's status; only when Wrangler died on its own is its status propagated.
   process.exit(shutdownExitCode ?? (signal ? 128 + (constants.signals[signal] ?? 0) : code ?? 1));

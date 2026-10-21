@@ -35,6 +35,7 @@ import { traceChat } from "./agent-tracing.js";
 import {
   AiGatewayConfig, getAiGatewayConfig, getGatewayModels, type AiGatewayLogRoute,
 } from "./ai-gateway.js";
+import { chatGptBroker } from "./chatgpt-local.js";
 import { completeText } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
 import { hasGpt56PromptCaching, splitSystemPrompt } from "./system-prompt-blocks.js";
@@ -459,6 +460,8 @@ type HandleArgs = {
   // gateway over env.WORKERS_AI.fetch() instead of the global fetch (see bindingFetch).
   // A per-call options.fetch still wins, which tests rely on to capture requests.
   fetch?: FetchFunction;
+  // Subscription routing must not be replaced by per-call paid-provider transport.
+  lockedTransport?: boolean;
   // The reasoning level of main turns, and the ID of the pi entry the model's flags come from
   // (see reasoningOptions). No level gives the model its built-in request (see builtInReasoning).
   reasoning?: ReasoningLevel;
@@ -513,6 +516,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
                 : {}),
         ...(args.fetch !== undefined ? { fetch: args.fetch } : {}),
         ...options,
+        ...(args.lockedTransport ? { fetch: args.fetch } : {}),
         ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
         // Session affinity: pi only sends it when caching isn't "none" (fine for us).
@@ -599,6 +603,37 @@ function signGeminiFunctionCalls(model: Model<Api>, payload: unknown): object | 
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
                          options: ModelRoutingOptions = {}): ModelHandle {
+  // Explicit subscription selection wins over every billed gateway route and fails closed.
+  if (config.authentication === "chatgpt") {
+    if (config.provider !== "openai" || !config.chatgptOwner) {
+      throw new Error("Invalid local ChatGPT model configuration.");
+    }
+    const catalog = catalogModel("openai", config.model);
+    return makeHandle({
+      model: {
+        id: config.model, name: catalog?.name ?? config.model,
+        api: "openai-responses", provider: "openai", baseUrl: "https://api.openai.com/v1",
+        reasoning: catalog?.reasoning ?? true, input: catalog?.input ?? ["text", "image"],
+        cost: ZERO_COST, ...modelTokenWindow(config, catalog),
+        thinkingLevelMap: catalog?.thinkingLevelMap,
+        compat: { ...catalog?.compat, supportsToolSearch: false, supportsAdditionalTools: false },
+      },
+      apiKey: "local-chatgpt-broker",
+      lockedTransport: true,
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        if (request.url !== "https://api.openai.com/v1/responses" || request.method !== "POST") {
+          throw new Error("Unsupported ChatGPT inference operation.");
+        }
+        return chatGptBroker(env, config.chatgptOwner!, "/responses", {
+          method: "POST", body: await request.text(), signal: request.signal,
+        });
+      },
+      sessionAffinity: options.sessionAffinity,
+      reasoning: config.reasoning,
+    });
+  }
+
   // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
   // Workers AI), routed through the user's own AI Gateway with unified billing. Honored regardless
   // of whether a platform AI Gateway is configured, so connected users are always billed correctly.
@@ -973,6 +1008,7 @@ export type AiModelGatekeeperProps = {
  * model: one a user added, or one the admin added and removed.
  */
 async function refuseRevokedModel(env: Cloudflare.Env, props: AiModelGatekeeperProps) {
+  if (props.config.authentication === "chatgpt") return;
   let models = await getGatewayModels(env);
   if (models?.get(props.config.model)?.provider === props.config.provider) {
     models.refuseDisabled(props.config.model);
