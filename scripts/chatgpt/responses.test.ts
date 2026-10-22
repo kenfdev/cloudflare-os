@@ -22,6 +22,92 @@ test("hosted tools and malformed input are refused", () => {
   assert.throws(() => normalizeResponses({model:"m",input:"text"}));
 });
 
+test("cache breakpoints are stripped only at message and content boundaries", () => {
+  const marker = { mode: "explicit" };
+  const text = '{"prompt_cache_breakpoint":"user data"}';
+  const input = [
+    ...["system", "developer", "user", "assistant"].map(role => ({
+      type: "message", role, prompt_cache_breakpoint: marker,
+      content: [{ type: "input_text", text, prompt_cache_breakpoint: marker },
+        { type: "input_image", image_url: "data:image/png;base64,test", prompt_cache_breakpoint: marker }],
+    })),
+    { type: "function_call", call_id: "one", name: "lookup", arguments: text },
+    { type: "function_call_output", call_id: "one", output: text },
+    { type: "custom_tool_call", call_id: "two", name: "custom", input: text },
+    { type: "custom_tool_call_output", call_id: "two", output: text },
+    { type: "reasoning", id: "r", summary: [] },
+  ];
+  const tools = [{ type: "function", name: "lookup", parameters: {
+    type: "object", properties: { prompt_cache_breakpoint: { type: "string" } },
+  } }];
+  const original = structuredClone({ input, tools });
+  const normalized = normalizeResponses({ model: "gpt-6.1-sol", input, tools,
+    prompt_cache_breakpoint: marker, prompt_cache_mode: "explicit" });
+  assert.deepEqual(normalized.input, input.map(item => {
+    if ("role" in item) return { type: "message", role: item.role === "system" ? "developer" : item.role,
+      content: [{ type: "input_text", text }, { type: "input_image", image_url: "data:image/png;base64,test" }] };
+    if (item.type === "function_call" || item.type === "custom_tool_call") return { ...item, namespace: "workshop" };
+    return item;
+  }));
+  assert.equal(normalized.prompt_cache_breakpoint, undefined);
+  assert.equal(normalized.prompt_cache_mode, undefined);
+  assert.deepEqual((normalized.tools as { tools: unknown[] }[])[0].tools, tools);
+  assert.deepEqual({ input, tools }, original);
+});
+
+for (const status of [400, 401, 403, 429, 503]) {
+  test(`HTTP ${status} retains safe diagnostics without upstream messages or secrets`, async () => {
+    const response = await proxyResponses({ body: { model: "m", input: [] }, accessToken: "private-token",
+      fetchImpl: async () => Response.json({ error: {
+        code: "invalid_parameter", param: "input[0].content[0].prompt_cache_breakpoint",
+        message: "private-token private-prompt", authorization: "private-token",
+      } }, { status, headers: { "x-request-id": "req_safe-123", "set-cookie": "private-cookie" } }) });
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get("x-request-id"), "req_safe-123");
+    assert.equal(response.headers.get("set-cookie"), null);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    const body = await response.json();
+    assert.equal(body.error.code, "invalid_parameter");
+    assert.equal(body.error.param, "input[0].content[0].prompt_cache_breakpoint");
+    assert.equal(body.error.request_id, "req_safe-123");
+    assert.match(body.error.message, new RegExp(`HTTP ${status}`));
+    assert.doesNotMatch(JSON.stringify(body), /private-/);
+  });
+}
+
+test("invalid or non-JSON diagnostic fields are replaced, not reflected", async () => {
+  for (const body of ["<html>private-body</html>", JSON.stringify({ error: {
+    code: "Bearer private-token", param: "private prompt text", message: "private-body",
+  } })]) {
+    const response = await proxyResponses({ body: { model: "m", input: [] }, accessToken: "fake",
+      fetchImpl: async () => new Response(body, { status: 400, headers: { "x-request-id": "private secret" } }) });
+    assert.equal(response.status, 400);
+    assert.equal(response.headers.get("x-request-id"), null);
+    const error = (await response.json()).error;
+    assert.equal(error.code, "chatgpt_inference_failed");
+    assert.equal(error.param, undefined);
+    assert.doesNotMatch(JSON.stringify(error), /private/);
+  }
+});
+
+test("oversized error bodies are cancelled and successful empty bodies become HTTP 502", async () => {
+  let cancelled = false;
+  const oversized = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new Uint8Array(64 * 1024 + 1)); },
+    cancel() { cancelled = true; },
+  });
+  const response = await proxyResponses({ body: { model: "m", input: [] }, accessToken: "fake",
+    fetchImpl: async () => new Response(oversized, { status: 503 }) });
+  assert.equal(response.status, 503);
+  assert.equal(cancelled, true);
+  assert.equal((await response.json()).error.code, "chatgpt_inference_failed");
+  for (const status of [204, 304]) {
+    const empty = await proxyResponses({ body: { model: "m", input: [] }, accessToken: "fake",
+      fetchImpl: async () => new Response(null, { status }) });
+    assert.equal(empty.status, 502);
+  }
+});
+
 async function stream(events: unknown[]) {
   let captured: Request | undefined;
   const response = await proxyResponses({body:{model:"m",input:[]},accessToken:"test-oauth-token",
@@ -60,3 +146,4 @@ test("SSE CRLF delimiters may be split at every byte", async () => {
   const output = await response.text();
   assert.match(output,/response.completed/); assert.doesNotMatch(output,/response.failed/);
 });
+

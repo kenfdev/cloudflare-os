@@ -370,6 +370,9 @@ export async function startBroker({
           const response = await proxy({ body, accessToken, signal });
           res.writeHead(response.status, {
             "content-type": response.headers.get("content-type") ?? "text/event-stream",
+            "cache-control": "no-store",
+            ...(response.headers.has("x-request-id")
+              ? { "x-request-id": response.headers.get("x-request-id") } : {}),
           });
           if (response.body)
             for await (const chunk of response.body) {
@@ -424,3 +427,4 @@ export async function startBroker({
     },
   };
 }
+

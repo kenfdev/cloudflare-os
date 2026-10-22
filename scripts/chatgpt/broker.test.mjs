@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { startBroker } from "./broker.mjs";
 import { tokenFields } from "./oauth.mjs";
+import { proxyResponses } from "./responses.ts";
 
 const secret = "s".repeat(43);
 function fixture(overrides = {}) {
@@ -92,6 +93,30 @@ test("loopback API denies unauthenticated, browser-origin, wrong Host, invalid u
   assert.equal((await call("/status", "GET", "../alice")).status, 401);
   assert.equal((await call("/anything")).status, 404);
   assert.equal((await call("/models?url=https://evil.invalid")).status, 400);
+});
+
+test("inference forwards sanitized HTTP errors and request IDs through the loopback broker", async (t) => {
+  const { broker, login } = await setup(t, {}, {
+    responseProxy: options => proxyResponses({ ...options,
+      fetchImpl: async () => Response.json({ error: {
+        code: "invalid_parameter", param: "prompt_cache_breakpoint", message: "private-prompt private-access",
+      } }, { status: 400, headers: { "x-request-id": "req_test" } }),
+    }),
+  });
+  await login();
+  const response = await fetch(`${broker.url}/responses`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${secret}`, "x-workshop-user-id": "alice", "content-type": "application/json" },
+    body: JSON.stringify({ model: "gpt-6.1-sol", input: [{ role: "user", content: "test" }] }),
+  });
+  assert.equal(response.status, 400);
+  assert.equal(response.headers.get("x-request-id"), "req_test");
+  assert.match(response.headers.get("content-type"), /application\/json/);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const body = await response.text();
+  assert.match(body, /invalid_parameter/);
+  assert.match(body, /prompt_cache_breakpoint/);
+  assert.doesNotMatch(body, /private-/);
 });
 test("callback binds owner; rejects invalid states/duplicates; consumes valid state once and redacts all tokens", async (t) => {
   const { f, broker, call } = await setup(t);
@@ -369,3 +394,4 @@ test("cancelled callback's failed revocation is not reported as successful logou
   assert.equal(f.records.get("user:alice").accessToken, undefined);
   assert.equal((await (await call("/logout", "POST")).json()).revoked, false);
 });
+
