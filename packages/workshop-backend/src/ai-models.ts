@@ -616,7 +616,11 @@ export function getModel(env: Cloudflare.Env, config: AiModelConfig,
         reasoning: catalog?.reasoning ?? true, input: catalog?.input ?? ["text", "image"],
         cost: ZERO_COST, ...modelTokenWindow(config, catalog),
         thinkingLevelMap: catalog?.thinkingLevelMap,
-        compat: { ...catalog?.compat, supportsToolSearch: false, supportsAdditionalTools: false },
+        compat: {
+          ...catalog?.compat, supportsToolSearch: false, supportsAdditionalTools: false,
+          // API-key catalog capabilities do not imply support on the subscription route.
+          supportsExplicitPromptCacheMode: false,
+        },
       },
       apiKey: "local-chatgpt-broker",
       lockedTransport: true,
@@ -1161,3 +1165,4 @@ class DecisionModelBindingImpl extends RpcTarget implements DecisionModelBinding
     return result.answers;
   }
 }
+

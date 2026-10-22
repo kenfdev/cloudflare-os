@@ -28,10 +28,13 @@ export async function chatGptBroker(
       "Content-Type": "application/json",
     },
   });
-  // Never reflect raw OAuth or upstream error bodies into frontend error reporting.
-  if (!response.ok) {
+  // Inference errors are sanitized by the broker and must remain HTTP responses so the SDK
+  // retains their status instead of reporting a transport-level "Connection error".
+  // Other operations must never reflect raw OAuth errors into frontend error reporting.
+  if (!response.ok && path !== "/responses") {
     await response.body?.cancel();
     throw new Error(`Local ChatGPT request failed (${response.status}). Reconnect or check your plan limits.`);
   }
   return response;
 }
+

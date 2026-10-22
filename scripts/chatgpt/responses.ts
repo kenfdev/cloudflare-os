@@ -20,6 +20,20 @@ export function normalizeResponses(body: unknown): Record<string, unknown> {
   output.stream = true;
   output.input = body.input.map(item => {
     if (!record(item)) throw new Error("Invalid ChatGPT input item.");
+    // Strip protocol metadata only at message/content boundaries, never inside tool schemas,
+    // arguments, outputs, or user text that happens to contain the same property name.
+    if (item.role === "system" || item.role === "developer" || item.role === "user" ||
+        item.role === "assistant") {
+      const { prompt_cache_breakpoint, ...message } = item;
+      item = message;
+      if (Array.isArray(message.content)) {
+        item.content = message.content.map(part => {
+          if (!record(part)) return part;
+          const { prompt_cache_breakpoint, ...content } = part;
+          return content;
+        });
+      }
+    }
     // The preview accepts developer messages, not explicit system messages.
     if (item.role === "system") return { ...item, role: "developer" };
     if ((item.type === "function_call" || item.type === "custom_tool_call") &&
@@ -51,6 +65,47 @@ const failure = (code: string) => `event: response.failed\ndata: ${JSON.stringif
   } },
 })}\n\n`;
 
+// Provider messages may echo prompts or credentials. Retain only bounded diagnostic identifiers,
+// not the upstream message/body, and bound reads even when the error is HTML or malformed JSON.
+async function inferenceError(response: Response): Promise<Response> {
+  let details: Record<string, unknown> = {};
+  if (response.body) {
+    const reader = response.body.getReader();
+    try {
+      const decoder = new TextDecoder();
+      let text = "";
+      let size = 0;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 64 * 1024) throw new Error("Oversized error.");
+        text += decoder.decode(value, { stream: true });
+      }
+      const parsed: unknown = JSON.parse(text + decoder.decode());
+      if (record(parsed) && record(parsed.error)) details = parsed.error;
+    } catch {
+      // No reliable structured diagnostics: the HTTP status still explains the failure class.
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+  }
+  const code = typeof details.code === "string" && /^[a-z][a-z0-9_]{0,99}$/.test(details.code)
+      ? details.code : "chatgpt_inference_failed";
+  const param = typeof details.param === "string" &&
+      /^[a-z_][a-z0-9_]*(?:(?:\.[a-z_][a-z0-9_]*)|(?:\[\d+\]))*$/.test(details.param) &&
+      details.param.length <= 200 ? details.param : undefined;
+  const requestId = response.headers.get("x-request-id");
+  const safeRequestId = requestId && /^[A-Za-z0-9_-]{1,128}$/.test(requestId)
+      ? requestId : undefined;
+  const status = response.status >= 400 && response.status <= 599 ? response.status : 502;
+  const message = `ChatGPT inference failed (HTTP ${status}; ${code}${param ? `; parameter: ${param}` : ""}${safeRequestId ? `; request: ${safeRequestId}` : ""}).`;
+  return Response.json({ error: { message, code, param, request_id: safeRequestId } }, {
+    status,
+    headers: { "Cache-Control": "no-store", ...(safeRequestId ? { "x-request-id": safeRequestId } : {}) },
+  });
+}
+
 /** Send only to the public Responses endpoint and require a successful terminal stream event. */
 export async function proxyResponses({ body, accessToken, signal, fetchImpl = fetch }: {
   body: unknown;
@@ -64,10 +119,7 @@ export async function proxyResponses({ body, accessToken, signal, fetchImpl = fe
     body: JSON.stringify(normalizeResponses(body)),
   });
   if (!response.ok || !response.body) {
-    await response.body?.cancel();
-    return new Response("ChatGPT inference unavailable. Check connection and plan limits.", {
-      status: response.ok ? 502 : response.status,
-    });
+    return inferenceError(response);
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -122,3 +174,4 @@ export async function proxyResponses({ body, accessToken, signal, fetchImpl = fe
     "Content-Type": "text/event-stream", "Cache-Control": "no-store",
   } });
 }
+
